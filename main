@@ -1,0 +1,164 @@
+# =============================
+# --------- IMPORTS ----------
+# =============================
+import cv2
+import os
+import datetime
+import torch
+import time
+import smtplib
+from email.message import EmailMessage
+from pathlib import Path
+import mimetypes #Multipurpose Internet Mail Extensions
+
+# =============================
+# --------- MODEL ------------
+# =============================
+model = torch.hub.load("ultralytics/yolov5", "yolov5n", pretrained=True) #yolov5 model
+model.conf = 0.5 #confidence
+model.iou = 0.45
+model.classes = [14]  #bird
+model.eval()
+
+# =============================
+# --------- EMAIL ------------
+# =============================
+SMTP_SERVER = "smtp.gmail.com"
+SMTP_PORT = 587
+
+SENDER_EMAIL = "servicesongbird@gmail.com" 
+SENDER_PASSWORD = "laad cqeu naro atmw"
+
+RECIPIENTS = [
+    "267922@burlcoschools.org",
+    "seriksson@burlcoschools.org"
+] #add recipients here
+
+IMAGES_DIR = Path("~/images").expanduser() #set the image path
+IMAGES_DIR.mkdir(exist_ok=True) #creates the directory if it doesn't exist
+
+# =============================
+# --------- CAMERA -----------
+# =============================
+FRAME_WIDTH = 320
+FRAME_HEIGHT = 240
+
+cap = cv2.VideoCapture(0) #/video0
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH) #set camera (cap) width
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT) #set camera height
+cap.set(cv2.CAP_PROP_FPS, 30) #set the max fps for the camera
+
+# =============================
+# --------- TRACKING ---------
+# =============================
+save_count = 0
+last_save_time = 0
+SAVE_INTERVAL = 2.0  #seconds
+
+print(" Starting bird detection, press 'q' to quit.")
+
+# =============================
+# --------- MAIN LOOP --------
+# =============================
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    frame_resized = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT))
+
+    with torch.no_grad():
+        results = model(frame_resized)
+
+    birds_detected = False
+    #when a bird is detected, set a coordinate map and put a rectangle around it
+    for *xyxy, conf, cls in results.xyxy[0]: 
+        class_name = model.names[int(cls)]
+        if "bird" in class_name.lower():
+            birds_detected = True
+            x1, y1, x2, y2 = map(int, xyxy)
+
+            #scale to display frame
+            sx = frame.shape[1] / FRAME_WIDTH
+            sy = frame.shape[0] / FRAME_HEIGHT
+
+            x1, x2 = int(x1 * sx), int(x2 * sx)
+            y1, y2 = int(y1 * sy), int(y2 * sy)
+
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(
+                frame,
+                "Bird",
+                (x1, y1 - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 255),
+                2
+            )
+
+    #save image
+    if birds_detected:
+        now = time.time()
+        if now - last_save_time > SAVE_INTERVAL:
+            ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            image_path = IMAGES_DIR / f"bird_{ts}.jpg"
+            cv2.imwrite(str(image_path), frame)
+            last_save_time = now
+            save_count += 1
+            print(f" Saved {image_path.name}")
+
+    cv2.imshow("Bird Detection", frame)
+
+    if cv2.waitKey(1) & 0xFF == ord("q"):
+        break
+
+# =============================
+# --------- CLEANUP ----------
+# =============================
+cap.release()
+cv2.destroyAllWindows()
+
+print(f"\n Detection stopped. Total images saved: {save_count}")
+
+# =============================
+# --------- EMAIL SEND -------
+# =============================
+image_files = sorted(IMAGES_DIR.glob("*.jpg"))
+
+#creates the email and adds in the subject, texts, recipients and images
+if image_files:
+    msg = EmailMessage()
+    msg["From"] = SENDER_EMAIL
+    msg["To"] = ", ".join(RECIPIENTS)
+    msg["Subject"] = "Bird Activity Detected"
+    msg.set_content("Bird activity was detected. See attached images.")
+    
+    
+    for image_path in image_files:
+        mime_type, _ = mimetypes.guess_type(image_path) #guesses the images MIME type based off extension
+        if mime_type is None:
+            mime_type = "application/octet-stream" #default
+        maintype, subtype = mime_type.split("/") #seperate maintype and MIME type
+        
+        #adds the images from the image directory
+        with open(image_path, "rb") as f: 
+            msg.add_attachment(
+                f.read(),
+                maintype=maintype,
+                subtype=subtype,
+                filename=image_path.name
+            )
+    #starts the email server and sends the email message
+    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as smtp:
+        smtp.starttls()
+        smtp.login(SENDER_EMAIL, SENDER_PASSWORD)
+        smtp.send_message(msg)
+
+    print("Email sent.")
+
+    #delete images after sending
+    for image_path in image_files:
+        image_path.unlink()
+
+else:
+    print("No images to email")
